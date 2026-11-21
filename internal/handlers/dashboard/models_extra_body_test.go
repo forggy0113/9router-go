@@ -19,7 +19,7 @@ func TestSaveCustomModelExtraBodyValidation(t *testing.T) {
 		wantStatus int
 		wantExtra  string // stored extraBody; "" means absent
 	}{
-		{"valid object", wrap(`{"provider":{"sort":"price"}}`), http.StatusOK, `{"provider":{"sort":"price"}}`},
+		{"valid object", wrap(`{"temperature":0.7,"reasoning":{"effort":"high"}}`), http.StatusOK, `{"temperature":0.7,"reasoning":{"effort":"high"}}`},
 		{"string value form", `{"key":"` + key + `","value":"{\"id\":\"vendor/m:free\",\"extraBody\":{\"top_k\":3}}"}`, http.StatusOK, `{"top_k":3}`},
 		{"null clears", wrap(`null`), http.StatusOK, ""},
 		{"empty string clears", wrap(`""`), http.StatusOK, ""},
@@ -33,15 +33,27 @@ func TestSaveCustomModelExtraBodyValidation(t *testing.T) {
 		{"non-openrouter key-only refused", `{"key":"opencode|vendor/m:free|llm","value":{"id":"vendor/m:free","extraBody":{"top_k":1}}}`, http.StatusBadRequest, ""},
 		{"non-openrouter clear accepted", `{"key":"openai|vendor/m:free|llm","value":{"providerAlias":"openai","id":"vendor/m:free","extraBody":null}}`, http.StatusOK, ""},
 	}
-	for _, denied := range []string{"model", "messages", "input", "prompt", "stream", "stream_options",
-		"tools", "tool_choice", "functions", "function_call", "response_format", "models",
-		"Model", "STREAM", "Messages"} {
+	for _, denied := range []string{"provider", "plugins", "model", "messages", "stream", "tools",
+		"max_tokens", "Temperature", "STREAM"} {
 		tests = append(tests, struct {
 			name       string
 			body       string
 			wantStatus int
 			wantExtra  string
-		}{"denied " + denied, wrap(`{"` + denied + `":1}`), http.StatusBadRequest, ""})
+		}{"unknown key " + denied, wrap(`{"` + denied + `":1}`), http.StatusBadRequest, ""})
+	}
+	for name, extra := range map[string]string{
+		"wrong type":         `{"temperature":"hot"}`,
+		"bad reasoning key":  `{"reasoning":{"foo":1}}`,
+		"max_tokens+effort":  `{"reasoning":{"max_tokens":5,"effort":"low"}}`,
+		"max_tokens+top eff": `{"reasoning":{"max_tokens":5},"reasoning_effort":"low"}`,
+	} {
+		tests = append(tests, struct {
+			name       string
+			body       string
+			wantStatus int
+			wantExtra  string
+		}{"invalid " + name, wrap(extra), http.StatusBadRequest, ""})
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

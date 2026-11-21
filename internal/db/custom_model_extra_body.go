@@ -5,7 +5,6 @@ import (
 	json "encoding/json/v2"
 	"errors"
 	"fmt"
-	"strings"
 
 	"9router/proxy/internal/log"
 	"9router/proxy/internal/providers"
@@ -15,36 +14,20 @@ import (
 const customModelsScope = "customModels"
 
 // ExtraBodyProvider is the only canonical provider whose custom models carry an
-// extraBody: OpenRouter's routing knobs (provider, reasoning, transforms, ...)
-// are request-body members a client usually cannot set itself.
+// extraBody: OpenRouter sampling and reasoning knobs a client usually cannot
+// set itself (see ExtraBodyAllowedKeys).
 const ExtraBodyProvider = "openrouter"
 
 // ExtraBodyMaxBytes caps a custom model's extraBody. The object is merged into
 // every request for that model, so it stays a few provider knobs, not a payload.
 const ExtraBodyMaxBytes = 8 << 10
 
-// extraBodyDeniedKeys are the request members the gateway owns: routing,
-// conversation, streaming and tool wiring. An operator override of any of them
-// would silently rewrite what the client asked for.
-var extraBodyDeniedKeys = map[string]struct{}{
-	"model": {}, "models": {}, "messages": {}, "input": {}, "prompt": {},
-	"stream": {}, "stream_options": {}, "tools": {}, "tool_choice": {},
-	"functions": {}, "function_call": {}, "response_format": {},
-}
-
 var (
-	ErrExtraBodyNotObject   = errors.New("extraBody must be a JSON object")
-	ErrExtraBodyTooLarge    = fmt.Errorf("extraBody exceeds %d bytes", ExtraBodyMaxBytes)
-	ErrExtraBodyReservedKey = errors.New("extraBody key is reserved for the gateway")
-	ErrExtraBodyProvider    = errors.New("extraBody is only supported for openrouter custom models")
+	ErrExtraBodyNotObject = errors.New("extraBody must be a JSON object")
+	ErrExtraBodyInvalidJSON = errors.New("extraBody is not valid JSON (duplicate keys or out-of-range number?)")
+	ErrExtraBodyTooLarge  = fmt.Errorf("extraBody exceeds %d bytes", ExtraBodyMaxBytes)
+	ErrExtraBodyProvider  = errors.New("extraBody is only supported for openrouter custom models")
 )
-
-// ExtraBodyDeniedKey reports whether key is a request member extraBody may not
-// set. Case-insensitive: some upstreams match member names loosely.
-func ExtraBodyDeniedKey(key string) bool {
-	_, denied := extraBodyDeniedKeys[strings.ToLower(key)]
-	return denied
-}
 
 // ExtraBodyProviderAllowed reports whether a custom model stored under alias
 // may carry an extraBody, resolving the alias to its canonical provider id.
@@ -65,14 +48,15 @@ func ParseExtraBody(raw []byte) (map[string]jsontext.Value, error) {
 	if len(raw) > ExtraBodyMaxBytes {
 		return nil, ErrExtraBodyTooLarge
 	}
+	if !jsontext.Value(raw).IsValid() {
+		return nil, ErrExtraBodyInvalidJSON
+	}
 	var members map[string]jsontext.Value
 	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
 		return nil, ErrExtraBodyNotObject
 	}
-	for key := range members {
-		if ExtraBodyDeniedKey(key) {
-			return nil, fmt.Errorf("%w: %q", ErrExtraBodyReservedKey, key)
-		}
+	if err := validateExtraBodyMembers(members); err != nil {
+		return nil, err
 	}
 	return members, nil
 }
@@ -144,9 +128,18 @@ func (r *Repo) buildExtraBodyIndex() (extraBodyIndex, error) {
 		if len(cm.ExtraBody) == 0 || string(cm.ExtraBody) == "null" {
 			continue
 		}
-		members, err := ParseExtraBody(cm.ExtraBody)
-		if err != nil {
-			log.Warn("extra-body", "skip custom model extraBody", "provider", cm.ProviderAlias, "model", cm.ID, "error", err)
+		var members map[string]jsontext.Value
+		if err := json.Unmarshal(cm.ExtraBody, &members); err != nil || members == nil {
+			log.Warn("extra-body", "skip custom model extraBody", "provider", cm.ProviderAlias, "model", cm.ID, "error", ErrExtraBodyNotObject)
+			continue
+		}
+		// A legacy or imported row may carry keys the allowlist now refuses:
+		// keep only the valid members rather than forwarding or half-applying.
+		if kept := FilterExtraBody(members); len(kept) != len(members) {
+			log.Warn("extra-body", "dropped disallowed extraBody keys", "provider", cm.ProviderAlias, "model", cm.ID, "error", validateExtraBodyMembers(members))
+			members = kept
+		}
+		if len(members) == 0 {
 			continue
 		}
 		provider := canonicalProvider(cm.ProviderAlias)

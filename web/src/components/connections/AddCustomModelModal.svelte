@@ -7,6 +7,7 @@
   import { parseModelIds, summarizeBulkModels } from '../../lib/bulk-models'
   import { parseExtraBodyInput } from '../../lib/extraBody'
   import { extraBodyToText } from '../../lib/customModelEdit'
+  import ExtraBodyField from './ExtraBodyField.svelte'
   import type { CustomModelData } from './types'
   import { MODEL_TYPE_OPTIONS, type CustomModelType } from './modelTypeOptions'
 
@@ -362,29 +363,7 @@
     {/if}
 
     {#if showExtraBody}
-      <div>
-        <label class="text-xs text-text-muted mb-1 block" for="add-custom-model-extra-body">
-          Custom request body (JSON, optional)
-        </label>
-        <textarea
-          id="add-custom-model-extra-body"
-          rows="4"
-          bind:value={extraBodyText}
-          placeholder={'{"provider": {"order": ["anthropic"]}}'}
-          aria-describedby={extraBody.error ? 'add-custom-model-extra-body-error' : undefined}
-          aria-invalid={extraBody.error ? 'true' : undefined}
-          class="w-full px-3 py-2 text-sm font-mono border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
-        ></textarea>
-        <p class="text-xs text-text-muted mt-1">
-          Merged into every request for this model. Your values win; only
-          <code class="font-mono bg-sidebar px-1 rounded">provider</code> is merged key by key.
-        </p>
-        {#if extraBody.error}
-          <p id="add-custom-model-extra-body-error" class="text-xs text-red-600 dark:text-red-400 mt-1" role="alert">
-            {extraBody.error}
-          </p>
-        {/if}
-      </div>
+      <ExtraBodyField bind:value={extraBodyText} error={extraBody.error} />
     {/if}
 
     {#if testStatus === 'ok'}

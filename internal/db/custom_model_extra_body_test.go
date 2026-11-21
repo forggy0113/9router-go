@@ -13,7 +13,7 @@ func TestCustomModelExtraBodyRoundTripAndInvalidation(t *testing.T) {
 	repo := NewRepo(database)
 
 	row := `{"providerAlias":"openrouter","id":"anthropic/claude-x:free","type":"llm",` +
-		`"extraBody":{"provider":{"order":["anthropic"]},"seed":12345678901234567}}`
+		`"extraBody":{"top_p":0.5,"seed":12345678901234567}}`
 	if err := repo.SetKV("customModels", "openrouter|anthropic/claude-x:free|llm", row); err != nil {
 		t.Fatalf("SetKV: %v", err)
 	}
@@ -38,14 +38,16 @@ func TestCustomModelExtraBodyRoundTripAndInvalidation(t *testing.T) {
 		t.Fatalf("after clear CustomModelExtraBody = %v, want nil", extra)
 	}
 
-	// A row that never went through save validation (an import) is skipped.
+	// A row that never went through save validation (an import) keeps only the
+	// allowed members.
 	if _, err := database.Exec(`INSERT INTO kv (scope, key, value) VALUES ('customModels', ?, ?)`,
-		"or|bad|llm", `{"providerAlias":"or","id":"bad","extraBody":{"model":"other"}}`); err != nil {
+		"or|bad|llm", `{"providerAlias":"or","id":"bad","extraBody":{"model":"other","provider":{"order":["x"]},"top_k":4}}`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
 	repo.InvalidateCustomModelExtraBody()
-	if extra := repo.CustomModelExtraBody("openrouter", "bad"); extra != nil {
-		t.Fatalf("reserved-key row indexed: %v", extra)
+	extra = repo.CustomModelExtraBody("openrouter", "bad")
+	if _, ok := extra["model"]; ok || extra["provider"] != nil || string(extra["top_k"]) != "4" {
+		t.Fatalf("legacy row indexed with disallowed keys: %v", extra)
 	}
 }
 
@@ -54,23 +56,92 @@ func TestParseExtraBody(t *testing.T) {
 		name    string
 		raw     string
 		wantErr error
+		wantMsg string // substring of the error
 	}{
-		{"object", `{"provider":{"sort":"price"}}`, nil},
-		{"array", `[1]`, ErrExtraBodyNotObject},
-		{"null", `null`, ErrExtraBodyNotObject},
-		{"oversize", `{"x":"` + strings.Repeat("a", ExtraBodyMaxBytes) + `"}`, ErrExtraBodyTooLarge},
-		{"reserved", `{"messages":[]}`, ErrExtraBodyReservedKey},
-		{"reserved Model", `{"Model":"x"}`, ErrExtraBodyReservedKey},
-		{"reserved STREAM", `{"STREAM":true}`, ErrExtraBodyReservedKey},
-		{"reserved Messages", `{"Messages":[]}`, ErrExtraBodyReservedKey},
+		{"object", `{"temperature":0.7,"reasoning":{"effort":"high"}}`, nil, ""},
+		{"empty object", `{}`, nil, ""},
+		{"array", `[1]`, ErrExtraBodyNotObject, ""},
+		{"null", `null`, ErrExtraBodyNotObject, ""},
+		{"duplicate key", `{"top_p":0.1,"top_p":0.2}`, ErrExtraBodyInvalidJSON, ""},
+		{"syntax error", `{"top_p":`, ErrExtraBodyInvalidJSON, ""},
+		{"oversize", `{"stop":"` + strings.Repeat("a", ExtraBodyMaxBytes) + `"}`, ErrExtraBodyTooLarge, ""},
+		// every allowed key, valid
+		{"temperature", `{"temperature":0.5}`, nil, ""},
+		{"top_p", `{"top_p":0.9}`, nil, ""},
+		{"top_k", `{"top_k":40}`, nil, ""},
+		{"min_p", `{"min_p":0.1}`, nil, ""},
+		{"top_a", `{"top_a":0.1}`, nil, ""},
+		{"repetition_penalty", `{"repetition_penalty":1.1}`, nil, ""},
+		{"frequency_penalty", `{"frequency_penalty":-1}`, nil, ""},
+		{"presence_penalty", `{"presence_penalty":1}`, nil, ""},
+		{"seed big int", `{"seed":12345678901234567}`, nil, ""},
+		{"seed 5.0", `{"seed":5.0}`, nil, ""},
+		{"stop string", `{"stop":"x"}`, nil, ""},
+		{"stop array", `{"stop":["a","b"]}`, nil, ""},
+		{"logit_bias", `{"logit_bias":{"12":-5,"7":1.5}}`, nil, ""},
+		{"logprobs", `{"logprobs":true}`, nil, ""},
+		{"top_logprobs", `{"top_logprobs":5}`, nil, ""},
+		{"max_completion_tokens", `{"max_completion_tokens":512}`, nil, ""},
+		{"reasoning_effort", `{"reasoning_effort":"xhigh"}`, nil, ""},
+		{"null values", `{"temperature":null,"stop":null,"reasoning":null,"reasoning_effort":null}`, nil, ""},
+		{"reasoning full", `{"reasoning":{"effort":"max","enabled":true,"exclude":false,"summary":"auto","context":"all_turns","mode":"pro"}}`, nil, ""},
+		{"reasoning max_tokens", `{"reasoning":{"max_tokens":100,"effort":null}}`, nil, ""},
+		// wrong types
+		{"temperature string", `{"temperature":"hot"}`, ErrExtraBodyKey, `"temperature"`},
+		{"top_p string", `{"top_p":"1"}`, ErrExtraBodyKey, `"top_p"`},
+		{"top_k float", `{"top_k":1.5}`, ErrExtraBodyKey, `"top_k"`},
+		{"min_p bool", `{"min_p":true}`, ErrExtraBodyKey, `"min_p"`},
+		{"top_a array", `{"top_a":[1]}`, ErrExtraBodyKey, `"top_a"`},
+		{"repetition_penalty str", `{"repetition_penalty":"1"}`, ErrExtraBodyKey, `"repetition_penalty"`},
+		{"frequency_penalty str", `{"frequency_penalty":"1"}`, ErrExtraBodyKey, `"frequency_penalty"`},
+		{"presence_penalty str", `{"presence_penalty":"1"}`, ErrExtraBodyKey, `"presence_penalty"`},
+		{"seed float", `{"seed":1.5}`, ErrExtraBodyKey, `"seed"`},
+		{"stop number", `{"stop":1}`, ErrExtraBodyKey, `"stop"`},
+		{"stop mixed array", `{"stop":["a",1]}`, ErrExtraBodyKey, `"stop"`},
+		{"logit_bias array", `{"logit_bias":[1]}`, ErrExtraBodyKey, `"logit_bias"`},
+		{"logit_bias str value", `{"logit_bias":{"1":"x"}}`, ErrExtraBodyKey, `"logit_bias"`},
+		{"logprobs number", `{"logprobs":1}`, ErrExtraBodyKey, `"logprobs"`},
+		{"top_logprobs str", `{"top_logprobs":"5"}`, ErrExtraBodyKey, `"top_logprobs"`},
+		{"max_completion_tokens str", `{"max_completion_tokens":"9"}`, ErrExtraBodyKey, `"max_completion_tokens"`},
+		{"reasoning_effort bad", `{"reasoning_effort":"extreme"}`, ErrExtraBodyKey, `"reasoning_effort"`},
+		{"reasoning string", `{"reasoning":"high"}`, ErrExtraBodyKey, `"reasoning"`},
+		// unknown keys, incl. case variants
+		{"provider", `{"provider":{"order":["a"]}}`, ErrExtraBodyKey, `"provider"`},
+		{"plugins", `{"plugins":[]}`, ErrExtraBodyKey, `"plugins"`},
+		{"model", `{"model":"x"}`, ErrExtraBodyKey, `"model"`},
+		{"messages", `{"messages":[]}`, ErrExtraBodyKey, `"messages"`},
+		{"max_tokens", `{"max_tokens":5}`, ErrExtraBodyKey, `"max_tokens"`},
+		{"Temperature", `{"Temperature":1}`, ErrExtraBodyKey, `"Temperature"`},
+		{"STREAM", `{"STREAM":true}`, ErrExtraBodyKey, `"STREAM"`},
+		// reasoning sub-keys and conflicts
+		{"reasoning unknown sub", `{"reasoning":{"foo":1}}`, ErrExtraBodyKey, `"reasoning.foo"`},
+		{"reasoning effort bad", `{"reasoning":{"effort":"x"}}`, ErrExtraBodyKey, `"reasoning.effort"`},
+		{"reasoning summary bad", `{"reasoning":{"summary":"long"}}`, ErrExtraBodyKey, `"reasoning.summary"`},
+		{"reasoning context bad", `{"reasoning":{"context":"x"}}`, ErrExtraBodyKey, `"reasoning.context"`},
+		{"reasoning mode bad", `{"reasoning":{"mode":"x"}}`, ErrExtraBodyKey, `"reasoning.mode"`},
+		{"reasoning max_tokens float", `{"reasoning":{"max_tokens":1.5}}`, ErrExtraBodyKey, `"reasoning.max_tokens"`},
+		{"reasoning enabled str", `{"reasoning":{"enabled":"yes"}}`, ErrExtraBodyKey, `"reasoning.enabled"`},
+		{"reasoning exclude str", `{"reasoning":{"exclude":1}}`, ErrExtraBodyKey, `"reasoning.exclude"`},
+		{"max_tokens+effort", `{"reasoning":{"max_tokens":5,"effort":"low"}}`, ErrExtraBodyKey, "cannot be combined"},
+		{"max_tokens+reasoning_effort", `{"reasoning":{"max_tokens":5},"reasoning_effort":"low"}`, ErrExtraBodyKey, "cannot be combined"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := ParseExtraBody([]byte(tt.raw))
 			if !errors.Is(err, tt.wantErr) {
-				t.Fatalf("ParseExtraBody(%s) err = %v, want %v", tt.name, err, tt.wantErr)
+				t.Fatalf("ParseExtraBody(%s) err = %v, want %v", tt.raw, err, tt.wantErr)
+			}
+			if tt.wantMsg != "" && !strings.Contains(err.Error(), tt.wantMsg) {
+				t.Errorf("err = %q, want it to contain %q", err, tt.wantMsg)
 			}
 		})
+	}
+}
+
+func TestParseExtraBodyUnknownKeyListsAllowed(t *testing.T) {
+	_, err := ParseExtraBody([]byte(`{"provider":{}}`))
+	if err == nil || !strings.Contains(err.Error(), strings.Join(ExtraBodyAllowedKeys, ", ")) {
+		t.Fatalf("err = %v, want the allowed key list", err)
 	}
 }
 

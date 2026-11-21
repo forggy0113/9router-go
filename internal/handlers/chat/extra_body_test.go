@@ -17,14 +17,14 @@ func TestMergeExtraBody(t *testing.T) {
 		{
 			name:  "operator overrides client on a shared key",
 			body:  `{"model":"m","temperature":0.2}`,
-			extra: `{"temperature":0.9,"transforms":["middle-out"]}`,
-			want:  `{"model":"m","temperature":0.9,"transforms":["middle-out"]}`,
+			extra: `{"temperature":0.9,"top_k":3}`,
+			want:  `{"model":"m","temperature":0.9,"top_k":3}`,
 		},
 		{
-			name:  "provider is deep-merged",
-			body:  `{"model":"m","provider":{"sort":"price","order":["a"]}}`,
-			extra: `{"provider":{"order":["b"],"allow_fallbacks":false}}`,
-			want:  `{"model":"m","provider":{"allow_fallbacks":false,"order":["b"],"sort":"price"}}`,
+			name:  "provider is not merged: legacy key dropped, client value kept",
+			body:  `{"model":"m","provider":{"sort":"price"}}`,
+			extra: `{"provider":{"order":["b"]},"plugins":[{"id":"web"}],"top_k":1}`,
+			want:  `{"model":"m","provider":{"sort":"price"},"top_k":1}`,
 		},
 		{
 			name:  "reasoning is replaced whole",
@@ -33,21 +33,27 @@ func TestMergeExtraBody(t *testing.T) {
 			want:  `{"model":"m","reasoning":{"max_tokens":100}}`,
 		},
 		{
+			name:  "invalid value dropped, valid kept",
+			body:  `{"model":"m"}`,
+			extra: `{"temperature":"hot","top_k":2}`,
+			want:  `{"model":"m","top_k":2}`,
+		},
+		{
+			name:  "max_tokens with effort drops reasoning",
+			body:  `{"model":"m"}`,
+			extra: `{"reasoning":{"max_tokens":9},"reasoning_effort":"low","top_k":2}`,
+			want:  `{"model":"m","top_k":2}`,
+		},
+		{
 			name:  "arrays are replaced",
 			body:  `{"model":"m","stop":["a","b"]}`,
 			extra: `{"stop":["c"]}`,
 			want:  `{"model":"m","stop":["c"]}`,
 		},
 		{
-			name:  "reserved keys are refused at merge time",
+			name:  "keys outside the allowlist are refused at merge time",
 			body:  `{"model":"m","stream":true}`,
-			extra: `{"model":"evil","stream":false,"tools":[],"top_k":5}`,
-			want:  `{"model":"m","stream":true,"top_k":5}`,
-		},
-		{
-			name:  "reserved keys are refused at merge time in any case",
-			body:  `{"model":"m","stream":true}`,
-			extra: `{"Model":"evil","STREAM":false,"Messages":[],"top_k":5}`,
+			extra: `{"model":"evil","stream":false,"tools":[],"Temperature":1,"top_k":5}`,
 			want:  `{"model":"m","stream":true,"top_k":5}`,
 		},
 		{

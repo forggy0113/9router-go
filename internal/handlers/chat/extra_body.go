@@ -14,11 +14,10 @@ import (
 var extraBodySkipWarn sync.Once
 
 // applyCustomExtraBody merges the operator's extraBody for provider/model into
-// an outbound OpenAI Chat body. The operator wins on a shared top-level key;
-// `provider` is deep-merged so a client's own routing preference survives
-// where the operator is silent; every other value (reasoning, arrays) is
-// replaced whole. Reserved keys are re-checked here because an imported row
-// never went through the save validation.
+// an outbound OpenAI Chat body. The operator wins on a shared top-level key and
+// every value (reasoning included) replaces the client's whole. Keys outside
+// the allowlist are dropped here too, because an imported or legacy row never
+// went through the save validation.
 func (h *ChatHandler) applyCustomExtraBody(body []byte, provider, model string) []byte {
 	if resolveProviderAlias(provider) != db.ExtraBodyProvider {
 		return body
@@ -56,34 +55,10 @@ func mergeExtraBody(body []byte, extra map[string]jsontext.Value) ([]byte, error
 	if m == nil {
 		return nil, db.ErrExtraBodyNotObject
 	}
-	for key, value := range extra {
-		if db.ExtraBodyDeniedKey(key) {
-			continue
-		}
-		if key == "provider" {
-			value = deepMergeJSON(m[key], value)
-		}
+	// The index already filters, but merge re-validates: nothing outside the
+	// allowlist is ever forwarded, whatever fed this map.
+	for key, value := range db.FilterExtraBody(extra) {
 		m[key] = value
 	}
 	return json.Marshal(m, json.Deterministic(true))
-}
-
-// deepMergeJSON overlays over onto base when both are objects, recursively;
-// any other pairing returns over unchanged.
-func deepMergeJSON(base, over jsontext.Value) jsontext.Value {
-	if base.Kind() != '{' || over.Kind() != '{' {
-		return over
-	}
-	var b, o map[string]jsontext.Value
-	if json.Unmarshal(base, &b) != nil || json.Unmarshal(over, &o) != nil {
-		return over
-	}
-	for key, value := range o {
-		b[key] = deepMergeJSON(b[key], value)
-	}
-	out, err := json.Marshal(b, json.Deterministic(true))
-	if err != nil {
-		return over
-	}
-	return out
 }

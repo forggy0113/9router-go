@@ -21,8 +21,8 @@ func TestCustomModelExtraBodyReachesOpenRouterOnly(t *testing.T) {
 
 	const model = "vendor/model-x:free"
 	extraBody := map[string]any{
-		"provider":  map[string]any{"order": []string{"anthropic"}},
-		"reasoning": map[string]any{"max_tokens": 64},
+		"temperature": 0.9,
+		"reasoning":   map[string]any{"max_tokens": 64},
 	}
 	save := env.Post(t, "/api/models/custom", map[string]any{
 		"key":   "openrouter|" + model + "|llm",
@@ -43,12 +43,9 @@ func TestCustomModelExtraBodyReachesOpenRouterOnly(t *testing.T) {
 	env.AddCombo(t, "combo-extra", "extra-combo", []string{"openrouter/" + model})
 
 	type sent struct {
-		Model    string `json:"model"`
-		Provider struct {
-			Order []string `json:"order"`
-			Sort  string   `json:"sort"`
-		} `json:"provider"`
-		Reasoning map[string]any `json:"reasoning"`
+		Model       string         `json:"model"`
+		Temperature *float64       `json:"temperature"`
+		Reasoning   map[string]any `json:"reasoning"`
 	}
 	decode := func(t *testing.T, req RecordedRequest) sent {
 		t.Helper()
@@ -64,7 +61,7 @@ func TestCustomModelExtraBodyReachesOpenRouterOnly(t *testing.T) {
 	for i, requested := range []string{"openrouter/" + model, "extra-combo"} {
 		t.Run(requested, func(t *testing.T) {
 			body := ChatBody(requested, false)
-			body["provider"] = map[string]any{"sort": "price"}
+			body["temperature"] = 0.2
 			res := env.Post(t, "/v1/chat/completions", body)
 			if res.Status != http.StatusOK {
 				t.Fatalf("status = %d: %s", res.Status, truncate(res.Body))
@@ -77,8 +74,8 @@ func TestCustomModelExtraBodyReachesOpenRouterOnly(t *testing.T) {
 			if got.Model != model {
 				t.Errorf("upstream model = %q, want %q", got.Model, model)
 			}
-			if len(got.Provider.Order) != 1 || got.Provider.Order[0] != "anthropic" || got.Provider.Sort != "price" {
-				t.Errorf("provider = %+v, want operator order deep-merged over client sort", got.Provider)
+			if got.Temperature == nil || *got.Temperature != 0.9 {
+				t.Errorf("temperature = %v, want operator 0.9 over client 0.2", got.Temperature)
 			}
 			if got.Reasoning["max_tokens"] != float64(64) {
 				t.Errorf("reasoning = %v, want the operator's", got.Reasoning)
@@ -93,7 +90,7 @@ func TestCustomModelExtraBodyReachesOpenRouterOnly(t *testing.T) {
 	if n := sibling.Count(); n != 1 {
 		t.Fatalf("sibling upstream requests = %d, want 1", n)
 	}
-	if got := decode(t, sibling.Last(t)); len(got.Provider.Order) != 0 || got.Reasoning != nil {
+	if got := decode(t, sibling.Last(t)); got.Temperature != nil || got.Reasoning != nil {
 		t.Errorf("sibling provider received extraBody: %+v", got)
 	}
 	if n := openrouter.Count(); n != 2 {
