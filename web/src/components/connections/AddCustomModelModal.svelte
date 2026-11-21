@@ -5,6 +5,7 @@
   import Toggle from '../../lib/ui/Toggle.svelte'
   import { api, type CustomModelBatchEntry } from '../../api/client'
   import { parseModelIds, summarizeBulkModels } from '../../lib/bulk-models'
+  import { parseExtraBodyInput } from '../../lib/extraBody'
   import { MODEL_TYPE_OPTIONS, type CustomModelType } from './modelTypeOptions'
 
   export interface ModelCaps {
@@ -28,6 +29,7 @@
       caps: ModelCaps,
       limits: ModelLimits,
       modelType: CustomModelType,
+      extraBody?: Record<string, unknown>,
     ) => Promise<void> | void
     /** Called after a bulk save, so the parent reloads the list the paste changed. */
     onBulkSaved?: () => void
@@ -89,6 +91,11 @@
       : '',
   )
 
+  // Operator request-body overrides; the gateway honours them on OpenRouter only.
+  let extraBodyText = $state('')
+  let showExtraBody = $derived(providerAlias === 'openrouter' && modelType === 'llm' && !isPaste)
+  let extraBody = $derived(showExtraBody ? parseExtraBodyInput(extraBodyText) : { value: undefined, error: '' })
+
   // Reset state when modal opens (upstream parity).
   $effect(() => {
     if (isOpen) {
@@ -100,6 +107,7 @@
       testError = ''
       bulkResult = null
       bulkError = ''
+      extraBodyText = ''
     }
   })
 
@@ -129,7 +137,7 @@
   // be tested against the provider first), anything longer goes to the batch endpoint so
   // that one bad line cannot take the others down with it.
   async function handleSubmit() {
-    if (limitsError) return
+    if (limitsError || extraBody.error) return
     if (isPaste) {
       if (bulkSaving || plan.ids.length === 0) return
       bulkSaving = true
@@ -159,7 +167,7 @@
     if (!cleanId || saving) return
     saving = true
     try {
-      await onSave(cleanId, { ...caps }, { ...limits }, modelType)
+      await onSave(cleanId, { ...caps }, { ...limits }, modelType, extraBody.value)
     } finally {
       saving = false
     }
@@ -348,6 +356,32 @@
       </div>
     {/if}
 
+    {#if showExtraBody}
+      <div>
+        <label class="text-xs text-text-muted mb-1 block" for="add-custom-model-extra-body">
+          Custom request body (JSON, optional)
+        </label>
+        <textarea
+          id="add-custom-model-extra-body"
+          rows="4"
+          bind:value={extraBodyText}
+          placeholder={'{"provider": {"order": ["anthropic"]}}'}
+          aria-describedby={extraBody.error ? 'add-custom-model-extra-body-error' : undefined}
+          aria-invalid={extraBody.error ? 'true' : undefined}
+          class="w-full px-3 py-2 text-sm font-mono border border-border rounded-lg bg-background focus:outline-none focus:border-primary"
+        ></textarea>
+        <p class="text-xs text-text-muted mt-1">
+          Merged into every request for this model. Your values win; only
+          <code class="font-mono bg-sidebar px-1 rounded">provider</code> is merged key by key.
+        </p>
+        {#if extraBody.error}
+          <p id="add-custom-model-extra-body-error" class="text-xs text-red-600 dark:text-red-400 mt-1" role="alert">
+            {extraBody.error}
+          </p>
+        {/if}
+      </div>
+    {/if}
+
     {#if testStatus === 'ok'}
       <div class="flex items-center gap-2 text-sm text-green-600">
         <span class="material-symbols-outlined text-base">check_circle</span>
@@ -367,7 +401,7 @@
         onclick={handleSubmit}
         fullWidth
         size="sm"
-        disabled={plan.ids.length === 0 || saving || bulkSaving || !!limitsError}
+        disabled={plan.ids.length === 0 || saving || bulkSaving || !!limitsError || !!extraBody.error}
       >
         {#if saving || bulkSaving}
           Adding...
